@@ -1,0 +1,365 @@
+{
+  "name": "Article Publishing Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "/webhook/telegram",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "telegram-trigger-node",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "documentId": "your_google_sheet_id_here",
+        "sheetName": "Sheet1",
+        "options": {}
+      },
+      "id": "get-all-articles-node",
+      "name": "Get All Articles from Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_cred_id",
+          "name": "Google Sheets OAuth2 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Извлечение заголовка и описания из входящего сообщения\nconst messageText = $input.first().json.text || $input.first().json.message?.text;\n\n// Предполагаем формат: Заголовок: ...\nОписание: ...\nconst lines = messageText.split('\n');\nlet title = '';\nlet description = '';\n\nfor (const line of lines) {\n  if (line.startsWith('Заголовок:') || line.startsWith('Заголовок ')) {\n    title = line.substring(line.indexOf(':') + 1).trim();\n  } else if (line.startsWith('Описание:') || line.startsWith('Описание ')) {\n    description = line.substring(line.indexOf(':') + 1).trim();\n  }\n}\n\n// Проверяем, есть ли дубликаты в полученных данных из Google Sheets\nconst existingArticles = $input.all().slice(1); // Пропускаем первый элемент, так как он содержит данные из вебхука\nlet isDuplicate = false;\n\nfor (const article of existingArticles) {\n  const existingTitle = article.json.Title || article.json.title || '';\n  if (existingTitle.toLowerCase().includes(title.toLowerCase()) || \n      title.toLowerCase().includes(existingTitle.toLowerCase())) {\n    isDuplicate = true;\n    break;\n  }\n}\n\n// Возвращаем результат с проверкой дубликата\nreturn [{\n  json: {\n    title: title,\n    description: description,\n    isDuplicate: isDuplicate,\n    originalMessage: messageText\n  }\n}];"
+      },
+      "id": "check-duplicate-node",
+      "name": "Check Duplicate Article",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $('Check Duplicate Article').item.json.isDuplicate }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combineOperation": "and"
+        }
+      },
+      "id": "duplicate-check-condition-node",
+      "name": "Continue if Not Duplicate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gemini-pro",
+        "prompt": "={{ $('Check Duplicate Article').item.json.title + '\n' + $('Check Duplicate Article').item.json.description }}",
+        "options": {}
+      },
+      "id": "generate-article-gemini-node",
+      "name": "Generate Article with Gemini",
+      "type": "n8n-nodes-base.googleGemini",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        180
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gemini_cred_id",
+          "name": "Google Gemini account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "imagePrompt",
+              "value": "={{ $('Check Duplicate Article').item.json.title }} - professional blog image"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "prepare-image-prompt-node",
+      "name": "Prepare Image Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/images/generations",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $('Prepare Image Prompt').item.json.openRouterApiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "body": "={\"model\": \"openai/dall-e-3\", \"prompt\": \"{{ $('Prepare Image Prompt').item.json.imagePrompt }}\", \"n\": 1, \"size\": \"1024x1024\"}",
+        "options": {}
+      },
+      "id": "generate-image-openrouter-node",
+      "name": "Generate Image with OpenRouter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion:": 4.1,
+      "position": [
+        1560,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "resource": "post",
+        "title": "={{ $('Check Duplicate Article').item.json.title }}",
+        "content": "={{ $('Generate Article with Gemini').item.json.result }}",
+        "excerpt": "={{ $('Check Duplicate Article').item.json.description }}",
+        "additionalFields": {
+          "featured_media": "={{ $('Generate Image with OpenRouter').item.json.data[0].url }}",
+          "status": "publish"
+        }
+      },
+      "id": "publish-wordpress-node",
+      "name": "Publish to WordPress",
+      "type": "n8n-nodes-base.wordPress",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        180
+      ],
+      "credentials": {
+        "wordPressApi": {
+          "id": "wordpress_cred_id",
+          "name": "WordPress account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": "={{ $('Check Duplicate Article').item.json.googleSheetsDocId }}",
+        "sheetName": "Sheet1",
+        "valueInput": "USER_ENTERED",
+        "options": {}
+      },
+      "id": "log-to-google-sheets-node",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1820,
+        180
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google_sheets_cred_id",
+          "name": "Google Sheets OAuth2 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Check Duplicate Article').item.json.chatId }}",
+        "text": "={{ '✅ Статья \"' + $('Check Duplicate Article').item.json.title + '\" успешно опубликована!' }}",
+        "options": {}
+      },
+      "id": "notify-original-telegram-node",
+      "name": "Notify Original Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        300
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_cred_id",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "target_channel_id",
+        "text": "={{ '🚀 Новая статья: ' + $('Check Duplicate Article').item.json.title + '\n\n' + $('Check Duplicate Article').item.json.description + '\n\nЧитать далее: ' + $('Publish to WordPress').item.json.link }}",
+        "options": {}
+      },
+      "id": "publish-telegram-channel-node",
+      "name": "Publish to Telegram Channel",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        420
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_cred_id",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate Article": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicates in Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicates in Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Duplicate Check Condition",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate Check Condition": {
+      "main": [
+        [
+          {
+            "node": "Generate Article with Gemini",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Image Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Image Prompt": {
+      "main": [
+        [
+          {
+            "node": "Generate Image with OpenRouter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Article with Gemini": {
+      "main": [
+        [
+          {
+            "node": "Publish to WordPress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Image with OpenRouter": {
+      "main": [
+        [
+          {
+            "node": "Publish to WordPress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish to WordPress": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Notify Original Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Publish to Telegram Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0",
+  "triggerCount": 1,
+  "tags": []
+}
